@@ -126,6 +126,9 @@ func (l *Ledger) validate() error {
 		default:
 			return fmt.Errorf("plan %q has invalid status %q", id, plan.Status)
 		}
+		if plan.Status == StatusActive && len(plan.Connections) == 0 {
+			return fmt.Errorf("plan %q is active but has no connections", id)
+		}
 		seen := make(map[string]struct{}, len(plan.Connections)*2)
 		for _, connection := range plan.Connections {
 			canonical, err := newConnection(connection.Source, connection.Destination)
