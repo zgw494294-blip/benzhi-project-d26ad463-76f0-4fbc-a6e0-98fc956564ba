@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"patchproof/patchproof"
 )
@@ -219,15 +220,74 @@ func runSmoke(stdout, stderr io.Writer) error {
 	return nil
 }
 
+// mutate loads the ledger, applies operation, and persists the result.
+//
+// Concurrent CLI invocations (possibly from different OS processes) can each
+// load the same ledger state, apply their own change, and then save — the last
+// save would silently overwrite the other's committed plan. To prevent that
+// loss without serializing the potentially long-running operation itself,
+// mutate uses optimistic concurrency control:
+//
+//  1. Load the ledger without holding the lock and apply operation. The
+//     operation may block for arbitrary durations, so the lock must not be
+//     held while it runs.
+//  2. Acquire a cross-process file lock, reload the latest on-disk ledger, and
+//     re-apply operation onto it. This merges the change onto the freshest
+//     state instead of overwriting it. Conflicts surface as normal ledger
+//     errors (duplicate plan, reserved endpoint, wrong state, etc.).
+//  3. Save and release the lock.
 func mutate(path string, operation func(*patchproof.Ledger) error) error {
-	ledger, err := load(path)
+	draft, err := load(path)
 	if err != nil {
 		return err
 	}
-	if err := operation(ledger); err != nil {
+	if err := operation(draft); err != nil {
 		return err
 	}
-	return patchproof.Save(path, ledger)
+
+	release, err := lockLedger(path)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	current, err := load(path)
+	if err != nil {
+		return err
+	}
+	if err := operation(current); err != nil {
+		return err
+	}
+	return patchproof.Save(path, current)
+}
+
+// lockLedger acquires an exclusive advisory lock on a dedicated lock file next
+// to the ledger. The returned function releases the lock and closes the lock
+// handle. flock(2) locks are associated with the underlying file (inode), so
+// using a separate, stable lock file keeps the lock valid even though Save
+// atomically replaces the ledger file via rename.
+func lockLedger(path string) (func(), error) {
+	if path == "" {
+		return nil, errors.New("ledger path cannot be blank")
+	}
+	lockPath := path + ".lock"
+	file, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open ledger lock: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock ledger: %w", err)
+	}
+	released := false
+	return func() {
+		if released {
+			return
+		}
+		released = true
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
 }
 
 func load(path string) (*patchproof.Ledger, error) {
