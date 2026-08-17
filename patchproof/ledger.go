@@ -109,6 +109,8 @@ func (l *Ledger) Activate(planID string) error {
 				return fmt.Errorf("%w: %s", ErrEndpointReserved, endpoint)
 			}
 		}
+	}
+	for _, connection := range plan.Connections {
 		l.occupied[connection.Source] = planID
 		l.occupied[connection.Destination] = planID
 	}
