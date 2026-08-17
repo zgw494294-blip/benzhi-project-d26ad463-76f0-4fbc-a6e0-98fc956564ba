@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"patchproof/patchproof"
 )
@@ -220,14 +221,80 @@ func runSmoke(stdout, stderr io.Writer) error {
 }
 
 func mutate(path string, operation func(*patchproof.Ledger) error) error {
-	ledger, err := load(path)
+	for {
+		lock, err := lockLedger(path)
+		if err != nil {
+			return err
+		}
+		ledger, err := load(path)
+		if err != nil {
+			return errors.Join(err, unlockLedger(lock))
+		}
+		snapshot, exists, err := ledgerSnapshot(path)
+		if err != nil {
+			return errors.Join(err, unlockLedger(lock))
+		}
+		if err := unlockLedger(lock); err != nil {
+			return err
+		}
+
+		operationErr := operation(ledger)
+
+		lock, err = lockLedger(path)
+		if err != nil {
+			return err
+		}
+		current, currentExists, err := ledgerSnapshot(path)
+		if err != nil {
+			return errors.Join(err, unlockLedger(lock))
+		}
+		if exists != currentExists || !bytes.Equal(snapshot, current) {
+			if err := unlockLedger(lock); err != nil {
+				return err
+			}
+			continue
+		}
+		if operationErr != nil {
+			return errors.Join(operationErr, unlockLedger(lock))
+		}
+		saveErr := patchproof.Save(path, ledger)
+		return errors.Join(saveErr, unlockLedger(lock))
+	}
+}
+
+func lockLedger(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("open ledger lock: %w", err)
 	}
-	if err := operation(ledger); err != nil {
-		return err
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("lock ledger: %w", err)
 	}
-	return patchproof.Save(path, ledger)
+	return lock, nil
+}
+
+func unlockLedger(lock *os.File) error {
+	unlockErr := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	closeErr := lock.Close()
+	if unlockErr != nil {
+		return fmt.Errorf("unlock ledger: %w", unlockErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close ledger lock: %w", closeErr)
+	}
+	return nil
+}
+
+func ledgerSnapshot(path string) ([]byte, bool, error) {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return data, true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	return nil, false, fmt.Errorf("read ledger snapshot: %w", err)
 }
 
 func load(path string) (*patchproof.Ledger, error) {
