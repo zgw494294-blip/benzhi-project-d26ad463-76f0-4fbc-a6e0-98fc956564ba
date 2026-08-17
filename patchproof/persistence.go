@@ -146,6 +146,9 @@ func (l *Ledger) validate() error {
 				}
 			}
 		} else {
+			if len(plan.Connections) == 0 {
+				return fmt.Errorf("active plan %q has no connections", id)
+			}
 			for endpoint := range seen {
 				if owner, reserved := l.occupied[endpoint]; !reserved || owner != id {
 					return fmt.Errorf("active plan %q is missing endpoint %q", id, endpoint)
