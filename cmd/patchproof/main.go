@@ -41,7 +41,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "show":
 		commandErr = runShow(ledgerPath, commandArgs, stdout, stderr)
 	case "smoke":
-		commandErr = runSmoke(stdout, stderr)
+		commandErr = runSmoke(commandArgs, stdout, stderr)
 	default:
 		commandErr = fmt.Errorf("unknown command %q", command)
 	}
@@ -185,7 +185,14 @@ func runShow(path string, args []string, stdout, stderr io.Writer) error {
 	return writeJSON(stdout, plan)
 }
 
-func runSmoke(stdout, stderr io.Writer) error {
+func runSmoke(args []string, stdout, stderr io.Writer) error {
+	flags := newFlags("smoke", stderr)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("smoke does not accept positional arguments")
+	}
 	directory, err := os.MkdirTemp("", "patchproof-smoke-")
 	if err != nil {
 		return fmt.Errorf("create smoke directory: %w", err)
